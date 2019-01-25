@@ -40,6 +40,7 @@
 #define ARGUMENTS 3 // constant number of arguments required for the external
 #define FLOAT_INLETS 10 // number of object float inlets
 #define PITCHLIST 10 // max values to be provided for pitch list
+#define ONESHOTPARAMSLIST 10 // number of values which will be provided for one-shot grain
 #define RANDMAX 10000
 #define DEFAULT_BUFFERMS 2000
 #define MIN_BUFFERMS 100
@@ -106,6 +107,9 @@ typedef struct _cmlivecloud {
 	double pitchlist_zero; // zero value pointer for randomize function
 	double pitchlist_size; // current numer of values stored in the pitch list array
 	t_bool pitchlist_active; // boolean pitch list active true/false
+    double *oneshotparamslist; // array to store one shot parameter values provided by method
+    double oneshot_zero; // zero value pointer for randomize function (?)
+    t_bool oneshot_active; // boolean oneshot active true/false (?)
 	long playback_timer; // timer for check-interval playback direction
 	double startmedian; // variable to store the current playback position (median between min and max)
 	t_bool play_reverse; // flag for reverse playback used when reverse-attr set to "direction"
@@ -145,6 +149,7 @@ void cmlivecloud_cloudsize(t_cmlivecloud *x, t_symbol *s, long ac, t_atom *av);
 void cmlivecloud_grainlength(t_cmlivecloud *x, t_symbol *s, long ac, t_atom *av);
 void cmlivecloud_record(t_cmlivecloud *x, t_symbol *s, long ac, t_atom *av);
 void cmlivecloud_pitchlist(t_cmlivecloud *x, t_symbol *s, long ac, t_atom *av);
+void cmlivecloud_oneshot(t_cmlivecloud *x, t_symbol *s, long ac, t_atom *av);
 void cmlivecloud_bang(t_cmlivecloud *x);
 t_max_err cmlivecloud_stereo_set(t_cmlivecloud *x, t_object *attr, long argc, t_atom *argv);
 t_max_err cmlivecloud_winterp_set(t_cmlivecloud *x, t_object *attr, long argc, t_atom *argv);
@@ -182,6 +187,7 @@ void ext_main(void *r) {
 	class_addmethod(cmlivecloud_class, (method)cmlivecloud_cloudsize,	"cloudsize",	A_GIMME, 0); // Bind the cloudsize message
 	class_addmethod(cmlivecloud_class, (method)cmlivecloud_grainlength,	"grainlength",	A_GIMME, 0); // Bind the grainlength message
 	class_addmethod(cmlivecloud_class, (method)cmlivecloud_pitchlist,	"pitchlist",	A_GIMME, 0); // Bind the pitchlist message
+    class_addmethod(cmlivecloud_class, (method)cmlivecloud_oneshot,     "oneshot",    A_GIMME, 0); // Bind the oneshot message
 	class_addmethod(cmlivecloud_class, (method)cmlivecloud_bufferms,	"bufferms",		A_GIMME, 0); // Bind the bufferms message
 	class_addmethod(cmlivecloud_class, (method)cmlivecloud_record, 		"record",		A_GIMME, 0); // Bind the record message
 	class_addmethod(cmlivecloud_class, (method)cmlivecloud_bang,		"bang",			0);
@@ -336,6 +342,9 @@ void *cmlivecloud_new(t_symbol *s, long argc, t_atom *argv) {
 
 	// ALLOCATE MEMORY FOR PITCH LIST
 	x->pitchlist = (double *)sysmem_newptrclear(PITCHLIST * sizeof(double));
+    
+    // ALOCATE MEMORY FOR ONESHOT LIST
+    x->oneshotparamslist = (double *)sysmem_newptrclear(ONESHOTPARAMSLIST * sizeof(double));
 	
 	/************************************************************************************************************************/
 	// INITIALIZE VALUES
@@ -368,7 +377,11 @@ void *cmlivecloud_new(t_symbol *s, long argc, t_atom *argv) {
 	x->pitchlist_active = false;
 	x->pitchlist_zero = 0.0;
 	x->pitchlist_size = 0.0;
-	
+    
+    // oneshot values
+    x->oneshot_zero = 0.0;
+    x->oneshot_active = false;
+    
 	// cloud structure members
 	for (i = 0; i < x->cloudsize; i++) {
 		x->cloud[i].length = 0;
@@ -479,7 +492,7 @@ void cmlivecloud_perform64(t_cmlivecloud *x, t_object *dsp64, double **ins, long
 	double pan_left, pan_right;
 	long max_delay; // calculated maximum delay length according to grain length and pitch
 	double startmedian_curr;
-
+    
 	// OUTLETS
 	t_double *out_left 	= (t_double *)outs[0]; // assign pointer to left output
 	t_double *out_right = (t_double *)outs[1]; // assign pointer to right output
@@ -680,9 +693,11 @@ void cmlivecloud_perform64(t_cmlivecloud *x, t_object *dsp64, double **ins, long
 
 			
 			// randomize grain parameters
+            // IN THIS LOOP the parameters coming from a oneshot message should be put accordingly
+            // they are already in inlets, so the only thing left is to ignore pitchlist
 			for (i = 0; i < 5; i++) {
 				// if currently processing randomized value for pitch (i == 2) and if pitchlist is active
-				if (i == 2 && x->pitchlist_active) {
+				if (i == 2 && x->pitchlist_active && (x->oneshot_active != true)) {
 					// get random postition from pitchlist and write stored value
 					x->randomized[i] = x->pitchlist[(int)cm_random(&x->pitchlist_zero, &x->pitchlist_size)];
 				}
@@ -831,6 +846,9 @@ void cmlivecloud_perform64(t_cmlivecloud *x, t_object *dsp64, double **ins, long
 					x->cloud[slot].right[readpos] = ((x->ringbuffer[index] * w_read) * pan_right) * gain;
 				}
 			}
+            if (x->oneshot_active == true) {
+                x->oneshot_active = false;
+            }
 		}
 		/************************************************************************************************************************/
 		// CONTINUE WITH THE PLAYBACK ROUTINE
@@ -978,6 +996,7 @@ void cmlivecloud_free(t_cmlivecloud *x) {
 	}
 	sysmem_freeptr(x->cloud);
 	sysmem_freeptr(x->pitchlist);
+    sysmem_freeptr(x->oneshotparamslist);
 
 }
 
@@ -1342,6 +1361,127 @@ void cmlivecloud_pitchlist(t_cmlivecloud *x, t_symbol *s, long ac, t_atom *av) {
 		object_error((t_object *)x, "maximum number of pitch values is 10");
 	}
 }
+
+/************************************************************************************************************************/
+/* THE ONESHOT METHOD                                                                                                 */
+/************************************************************************************************************************/
+void cmlivecloud_oneshot(t_cmlivecloud *x, t_symbol *s, long ac, t_atom *av) {
+    double value;
+    double dump;
+
+    if (ac != ONESHOTPARAMSLIST ) {
+        object_error((t_object *)x, "you need to send a list of 10 values (delay min and max, length min and max, pitch min and max, pan min and max and gain min and max)");
+    }
+    else if (ac == ONESHOTPARAMSLIST) {
+        x->oneshot_active = true;
+        // clear array
+        for (int i = 0; i < ONESHOTPARAMSLIST; i++ ) {
+            x->oneshotparamslist[i] = 0; // all of a sudden this is completely useless. It may be useful in the futur if it turns out it's not good to set values for object_inlets this way.
+        }
+        // write args into array
+        for (int i = 0; i < ONESHOTPARAMSLIST; i++) {
+            value = atom_getfloat(av+i);
+            switch (i) {
+                case 0: // delay min
+                    if (value < 0.0 || value > x->bufferms) {
+                        dump = value;
+                    }
+                    else {
+                        x->object_inlets[0] = value;
+                    }
+                    break;
+                    
+                case 1: // delay max
+                    if (value < 0.0 || value > x->bufferms) {
+                        dump = value;
+                    }
+                    else {
+                        x->object_inlets[1] = value;
+                    }
+                    break;
+                    
+                case 2: // length min
+                    if (value < MIN_GRAINLENGTH || value > x->grainlength) {
+                        dump = value;
+                    }
+                    else {
+                        x->object_inlets[2] = value;
+                    }
+                    break;
+                    
+                case 3: // length max
+                    if (value < MIN_GRAINLENGTH || value > x->grainlength) {
+                        dump = value;
+                    }
+                    else {
+                        x->object_inlets[3] = value;
+                    }
+                    break;
+                    
+                case 4: // pitch min
+                    if (value <= 0.0 || value > MAX_PITCH) {
+                        dump = value;
+                    }
+                    else {
+                        x->object_inlets[4] = value;
+                    }
+                    break;
+                    
+                case 5: // pitch max
+                    if (value <= 0.0 || value > MAX_PITCH) {
+                        dump = value;
+                    }
+                    else {
+                        x->object_inlets[5] = value;
+                    }
+                    break;
+                    
+                case 6: // pan min
+                    if (value < -1.0 || value > 1.0) {
+                        dump = value;
+                    }
+                    else {
+                        x->object_inlets[6] = value;
+                    }
+                    break;
+                    
+                case 7: // pan max
+                    if (value < -1.0 || value > 1.0) {
+                        dump = value;
+                    }
+                    else {
+                        x->object_inlets[7] = value;
+                    }
+                    break;
+                    
+                case 8: // gain min
+                    if (value < 0.0 || value > MAX_GAIN) {
+                        dump = value;
+                    }
+                    else {
+                        x->object_inlets[8] = value;
+                    }
+                    break;
+                    
+                case 9: // gain max
+                    if (value < 0.0 || value > MAX_GAIN) {
+                        dump = value;
+                    }
+                    else {
+                        x->object_inlets[9] = value;
+                    }
+                    break;
+            }
+
+        }
+    }
+    else {
+        object_error((t_object *)x, "soemthing that should not have happened, happened.");
+    }
+    x->oneshot_active = true; // this will only be usefull to prevent pitchlist to have an effect in case it was active
+    x->bang_trigger = true;
+}
+
 
 
 /************************************************************************************************************************/
